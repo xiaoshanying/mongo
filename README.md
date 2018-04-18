@@ -316,5 +316,173 @@ db.user.find({"userId" : {"$not" : {"$mod" : [5,1]}}})
      		}
      	}
      });
-     
+     接着在返回值中找最大值的标签finalize附带一个函数,在每组结果传递到客户端之前被调用一次,可以用其修改结果的返回
+     db.runCommand({"group" : {
+        "ns" : "集合名",
+        "key" : {"tags" : true},分组字段
+        "initial" : {"tags" : {}},
+        "$reduce" : {
+
+        },
+        "finalize" : function(prev){
+            var mostPopular = 0;
+            for(i in prev.tags){
+              if(prev.tags[i] > mostPopular){
+                prev.tags = i;
+                mostPopular = prev.tags[i];
+              }
+            }
+            delete prev.tags
+        }
+     }});
+     (5)将函数作为键使用
+     db.集合名.group({
+        "ns" : "集合名",
+        "$keyf" : function(x) {return x.category.toLowerCase();},
+        ...
+     });
+12.MapReduce(很慢,不要用在实时的任务,要作为后台任务来运行)
+     (1)它是一个轻松并行化到多个服务器的聚合方法,拆分问题 -> 将各个部分发送到不同的机器上
+      -> 让每台机器完成一部分。-> 当所有机器都完成的时候,再把结果汇集起来形成最终完整的结果.
+     (2)实例:找出集合中的所有键
+     this当前映射文档的引用
+      map = function(){
+        for(var key iin this){
+          emit(key,{count : 1});
+        }
+      }
+      reduce函数有两个值:一个是key,另一个是emit返回的第一个值
+      reduce = function(key,emits){
+        total = 0;
+        for(var i in emits){
+          total += emits[i].count;
+        }
+        return {"count" : total};
+      }
+
+      mr = db.runCommand({
+        "mapreduce" : "集合",
+        "map" :  map,
+        "reduce": reduce
+      });
+
+      (3)网页分类
+       给链接打标签,找出哪个链接最热门
+       map = function(){
+          for(var i in this.tags){
+              var recency = 1(new Date() - this.date);
+              var score = recency * this.score;
+              emit(this.tags[i],{"urls" : [this.url], "score" : score)});
+          }
+       }
+
+       简化同一个标签的所有值,形成这个标签的分数
+       reduce = function(key,emits){
+          var total = {urls : [],score : 0}
+          for(var i in emits){
+              emits[i].urls.forEach(function(url){
+                  total.urls.push(url);
+              })
+              this.score += emits[i].score;
+          }
+          return total;
+       }
+
+
+13数据库命令
+  (1)getLastError查询一个更新对多少个文档起作用
+  (2)命令工作原理:
+  (3)命令:
+  db.listCommands()获取所有命令的最新列表
+  (4)数据库引用:
+  dbref类似url,唯一确定一个到文档的引用
+
+14管理
+  (1)启动:
+  mongod --help查看帮助
+  mongod --dbpath 设置数据目录,默认/data/db,每个mongod进程都需要独立的数据目录.
+  如果有3个实例,必须要有3个独立的数据目录.mongod启动时,会在数据目录创建mongod.lock文件.
+  这个文件用于防止其他mongod进程使用该数据目录.
+  --port 指定监听的端口号,默认27017,运行多个的话,需要指定不同的端口号
+  --fork 以守护进程的方式运行mongodb,创建服务器进程
+  --logpath 指定日志输出路径,默认会覆盖,追加用--logappend
+  --config 指定配置文件,加载命令行未指定的各种选项
+
+  例如:启动mongo,作为守护进程监听8888,并输出日志到mongo.log
+  ./mongod --port 8888 --fork --logpath mongo.log
+  (2)配置文件
+  shutdownServer()
+  (3)监控
+  启动mongod时,还会启动一个http server,端口比mongo端口大1000,访问
+  localhost:port可以查看mongo信息
+  利用管理接口需要在启动时:
+  ./mongod --rest来开启rest支持
+  --nohttpinterface关闭管理接口
+  localhost:port/_status查看服务器状态
+  (4)状态信息统计
+  globalLock:全局所占用服务器的时间
+  mem:包含服务器内存映射了多少数据,服务器进程的虚拟内存和常驻内存的占用情况(Mb)
+  indexCounters:表示B树在磁盘检索(misses),内存检索(hits)的次数,比值上升就要
+  考虑添加内存了.
+  backgroundFlushing:后台做了多少次fsync以及用了多少时间
+  opcounters:包含每种主要操作的次数
+  asserts:统计断言的次数
+
+  (5)安全认证
+  db.addUser("用户名","密码",true(只读权限))
+  建议将mongodb的服务器布置在防火墙后或者布置在只有应用服务器能访问的网络中.
+  如果需要被外面访问的话,建议使用--bindid选项,指定绑定到的本地ip地址
+
+  例如:只能从本机应用服务器访问,
+  mongod --bindip localhost
+  禁止服务端运行js
+  --noscripting
+
+  (6)备份(不实时)
+   mongodump运行时备份
+   从备份中恢复
+   mongorestore
+
+   mongorestore获取mongodump的结果,并将备份数据插入到运行的mongodb实例
+
+   例子:从数据库test到backup目录的热备,然后调用mongorestore
+   ./mongodump -d(指定要备份的数据库) test -o(指定输出) backup
+   
+   恢复:./mongorestore -d foo --drop backup/test/
+   --drop代表在恢复前删除集合(若存在),否则,数据库就会与现有的集合数据合并
+  (7)fsync和锁
+   fsync能在mongo运行时复制数据目录还不会损毁数据
+   fsync命令会强制服务器简化所有缓冲区写入磁盘,还可以上锁阻止对数据库的进一步写入，
+   直到释放锁。
+
+   例子:强制执行fsync并获得写入锁
+   use db
+   db.runCommand({
+      "fsync" : 1,
+      "lock" : 1
+   });
+   备份好了,解锁
+   db.$cmd.sys.unlock.findOne();
+   返回:{"ok" :1,"info" : "unlock requested"}
+   db.currentOp()
+   返回:{"inprog" : []}
+   运行currentOp是为了确保已经解锁了
+
+   利用fsync可以灵活备份,代价是:一些写入操作暂时被阻塞了.
+
+   注意:唯一不耽误写还能保证实时快照的备份方式就是通过 -> 从服务器备份
+  
+   (8)从属备份:推荐
+
+   (9)修复
+    i:未能正常停止mongo后应该修复数据库.要是未正常停止,下次启动服务器备份时mongo会提示:
+    old lock file: ....
+    recommand removing file and running --repair
+    see:xxx
+    ii:修复所有数据库最简单的方式:mongod --repair来穹顶服务起
+
+    iii:修复数据库能起到压缩数据的作用,闲置的空间在修复后被重新回收.
+    iiii:修复运行中的数据库
+    use db
+    db.repairDatabase()
 
