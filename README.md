@@ -485,4 +485,148 @@ db.user.find({"userId" : {"$not" : {"$mod" : [5,1]}}})
     iiii:修复运行中的数据库
     use db
     db.repairDatabase()
+    15复制(应对故障,数据集成,多扩展,热备,离线批处理的数据源)
+    (1)主从复制
+     i:场景:备份,故障恢复,读扩展
+    ii:类型
+       一主一从:
+       一主多从:
+   iii:描述:
+       最基本的设置是建立一个主节点和一个或者多个从节点,每个从节点要知道主节点的地址。
+       运行 -> mongod --master就启动了主服务器.
+       运行 -> mongod --slave --source master_ip 则启动从服务器
 
+   iiii:示例
+       首先,给主节点建立数据目录,并绑定端口8888
+       mkdir -p ~/dbs/master
+       ./mongod --dbpath ~/dbs/master --port 8888 --master
+
+       设置从节点,需要不同的目录和端口
+       mkdir -p ~/dbs/slave
+       ./mongod --dbpath ~/dbs/slave --port 9999 --slave --source localhost:8888
+
+       一般从节点不超过12个
+       不能丛丛复制
+
+    (2)主从复制的选项
+      --only 在从节点上指定复制特定的某个数据库(不指定默认复制所有)
+      --slavedelay 用在从节点上,当应用主节点的操作时增加延时(秒),这样就能轻松设置延时从节点,
+      作用:防护无意删除,插入垃圾数据
+
+      --fastsync 以主节点的数据快照为基础启动从节点。如果数据目录一开始是主节点的数据快照,从
+      节点用这个选项启动要比做完整的同步快的多
+
+      --autoresync 如果从节点与主节点不同步了,则自动重新同步
+
+      --oplogSize 主节点oplog大小(Mb)
+
+    (3)添加及删除源
+      启动从节点时可以用 --source指定主节点
+      假设主节点绑定localhost:27017。启动从节点时可以不添加源,而是随后向source集合添加主节点信息.
+      先启动从节点:
+      ./mongod --slave --dbpath ~/dbs/slave --port 端口
+
+       在shell中添加master
+       use local
+       db.sources.insert({"host" : "localhost:27017"})
+       查看原:
+       db.sources.find()
+
+       假设在生产环境下,想更改从节点的配置,改用prod.example.com为源,则可以用insert和remove来完成
+       db.sources.insert({"host" : "prod.example.com:27017"})
+       db.sources.remove({"host" : "localhost:27017"})
+
+       如果切换的两个主节点有相同的集合,mongo会尝试合并,但不能保证正确合并.
+       如果一个从节点对应多个不同的主节点,最好在主节点上使用不同的命名空间
+
+    (4)副本集
+       i:什么是副本集?
+         有自动故障恢复功能的主从集群。主从集群和副本集的区别在于,副本集没有固定的主节点
+         整个集群会选举出一个主节点,当其不能工作时则变更到其它节点.
+
+         副本集总会有一个活跃节点和一个或者多个备份节点
+
+       ii:优点?
+          副本集最美妙的地方就是所有的东西都是自动化的。自动提升备份节点成为活跃节点.
+
+      iii:初始化副本集?
+           示例:两个服务器,不能用localhost地址作为成员,得设置主机名
+            cat /etc/hostname
+            morton
+           ->首先,为每一个服务器创建数据目录,选择端口
+           mkdir -p ~/dbs/node1 ~/dbs/node2
+
+           ->启动之前,给副本集起个名字,blort
+
+           ->启动服务器,--replSet让服务器知晓在这个blort副本集中还有别的同伴
+             位置在morton:10002还没启动
+             ./mongod --dbpath ~/dbs/node1 --port 10001 --replSet blort/morton:10002
+
+           ->以同样的方式启动另一台
+             ./mongod --dbpath ~/dbs/node2 --port 10002 --replSet blort/morton:10001
+
+           ->如果想添加第三台,可以:
+             ./mongod --dbpath ~/dbs/node3 --port 10003 --replSet blort/morton:10001
+             或者
+             ./mongod --dbpath ~/dbs/node3 --port 10003 --replSet blort/morton:10001,morton:10002
+    
+           副本集的亮点自动检测功能,在指定单台服务器后,mongo会自动搜索并连接其余的节点
+           ->在shell中初始化副本集
+           打开shell连接其中一个服务器,例morton:10001,初始化命令只能执行一次
+           ./mongod morton:10001/admin
+
+           ->db.runCommand({
+              "replSetInitiate" : {
+                "_id" : "blort", 副本集名字
+                "members" : [ 副本集服务器列表
+                    {
+                      "_id" : 1,
+                      "host" : "morton:10001"
+                    },
+                    {
+                      "_id" : 2,
+                      "host" : "morton:10002"
+                    }
+                ]
+              }
+            })
+
+        iiii:副本集中的节点
+           任何时间,集群只有一个活跃及诶单,其它都是备份节点。
+           节点类型:
+               standard:常规节点,存储一份完整的数据副本,参与投票选举,有可能成为活跃节点
+               passive:存储了完整的数据副本,参与投票,不能成为活跃节点
+               arbiter:仲裁者只参与投票,不接收复制的数据,也不能成为活跃节点
+
+            节点区别:
+               标准节点和被动节点之间的区别仅仅是数量的差别;参与节点(非仲裁)有个优先权。
+               优先权为0则是被动的,不能成为活跃节点。优先值不为0，则按照由大到小选出活跃节点
+               优先值一样的话则看谁的数据比较新。
+               如果有两个优先值为1和一个优先值为0.5的节点,最后一个节点只有在前两个节点都不可用
+               的时候才能成为活跃节点
+
+            修改节点priority键,配置成标准节点或者被动节点
+            members.push({
+                "_id" : 3,
+                "host" : "morton:10003",
+                "priority" : 40
+              });
+            默认优先级是1，可以是0-1000(包含1000)
+
+            指定仲裁节点:arbiterOnly
+            members.push({
+                "_id" : 4,
+                "host" : "morton:10004",
+                "arbiterOnly" : true
+              });
+
+        (5)副本集故障切换和活跃节点选举
+
+        (6)主节点的操作日志oplog
+           主节点的操作记录称为oplog.oplog存储在一个特殊的数据库中,叫做local.
+           oplog就在其中的oplog.$main集合里面
+           oplog中的每个文档都代表主节点上执行的一个操作.
+           ts:操作时间戳,跟踪操作执行的时间,由4字节的时间戳,4字节的递增计数器构成
+           op:操作类型,只有1字节代码("i")代表插入
+           ns:执行操作的命名空间(集合名)
+           o:进一步制定要执行的操作的文档,对插入来说,就是要插入的文档
