@@ -630,3 +630,135 @@ db.user.find({"userId" : {"$not" : {"$mod" : [5,1]}}})
            op:操作类型,只有1字节代码("i")代表插入
            ns:执行操作的命名空间(集合名)
            o:进一步制定要执行的操作的文档,对插入来说,就是要插入的文档
+
+        （7）oplog只记录改变数据库状态的操作,查询不存储在oplog中。
+            因为oplog只是作为从节点与主节点保持数据同步的机制
+         (8)启动时指定oplog大小
+            --oplogSize 默认单位MB,默认情况下64位的实例将使用5%的可用空间
+            这个空间将在local数据库中分配,并在服务器启动时预先分配
+         (9)同步:
+            从节点第一次启动时,会对主节点的数据进行完整的同步。从节点复制主节点的每个文档
+            .同步完成后,从节点开始查询主节点的oplog并执行这些操作,保证数据是最新的.
+
+          (10)主节点的复制状态包括从节点的列表,从节点连接上主节点时会执行握手,这个列表
+              存放在slaves集合中
+              db.slaves.find()
+           (11)db.printReplicationInfo()
+               查看复制的状态
+
+16分片
+  作用:通过分片能够增加更多的机器来应对不断增加的负载和数据
+  (1)分片简介:
+     将数据拆分,分散在不同机器上的过程.
+     mongo分片的思想是将集合切分成小块。这些块分散到若干的片里面,每个片
+     只负责总数据的一部分。
+     应用程序不必知道哪片对应哪些数据,在分片之前要运行一个路由进程(mongos)
+     这个路由器知道所有数据的存放位置,所以应用可以连接它来正常的发送请求。
+  (2)分片对应用来说是透明的
+  (3)何时分片?
+     机器的磁盘不都用
+     单个mongod已经不能满足写数据的性能需要
+     想将大量的数据放在内存中提高性能
+  (4)片键:
+     设置分片时,需要从集合里面选一个键,用该键的值作为数据拆分的依据,这个键称为片键.
+  (5)将已有的集合分片
+  (6)片键对操作的影响
+     mongos会在所有片上查询,返回结果时采用归并排序
+  (7)建立分片:
+     <1>启动实际的服务器
+     <2>决定如何切分数据
+     分片一般会有3个组成部分
+     片 + mongos + 配置服务器
+
+  (8)分片第一步 -> 启动服务器
+     <1>启动配置服务器和mongos.
+        配置服务器最先启动,mongos需要用到配置服务器上的配置信息,配置服务器的启动就像
+        普通mongod一样
+        mkdir -p ~/dbs/config
+        ./mongod --dbpath ~/dbs/config --port 20000
+        配置服务器不需要很多空间和资源(200MB的实际数据大约占用1k的空间)
+        建立mongos进程,供应用程序连接.
+        ./mongos --port 30000 --configdb localhost:20000
+
+     <2>添加片:
+        片就是普通的mongod实例(或者是副本集)
+        mkdir -p ~/dbs/shard1
+        ./mongod --dbpath ~/dbs/shard1 --port 10000
+        连接刚才启动的mongos,为集群添加一个片,启动hsell,链接mongos
+        ./mongo localhost:30000/admin
+        db.runCommand({
+              addshard : "localhost:10000",
+              allowLocal : true
+          })
+        返回{
+          "added" : "localhost:10000",
+          "ok" : true
+        }
+        当在localhost上运行分片时,得设定allowLocal键
+   (9)切分数据
+      mongoDb不会将存储的每一条数据都直接发布,得先在数据库和集合的级别将分片功能打开.
+      示例:以"_id"为基准切分foo数据库的bar集合
+
+      开启分片:db.runCommand({"enablesharding" : "foo"})
+
+      对数据库分片后,其内部的集合便会存储到不同的片上,同时也是对这些集合分片的前置条件.
+
+      在数据库级别启用了分片以后,就可以使用shardcollection对集合进行分片:
+      db.runCommand({
+            "shardcollection" : "foo.bar",
+            "key" : {
+                "_id" : 1
+            }
+        })
+
+    (10)生产配置
+       需要:多个配置服务器
+            多个mongos服务器
+            每个片都是副本集
+            正确设置w
+        <1>健壮的配置:
+           mkdir -p ~/dbs/config1 ~/dbs/config2 ~/dbs/config3
+           ./mongod --dbpath ~/dbs/config1 --port 20001
+           ./mongod --dbpath ~/dbs/config2 --port 20002
+           ./mongod --dbpath ~/dbs/config3 --port 20003
+           启动mongos的时候应将其连接到这3个配置服务器
+           ./mongos --configdb localhost:20001,localhost:20002,localhost:20003
+
+           配置服务器采用的是两步提交机制,而不是普通的mongo异步复制,来维护集群配置的
+           不同副本,这样能保证集群状态的一致性
+
+        <2>多个mongos
+           mongos数量不受限制.建议针对一个应用服务器只运行一个mongos进程
+
+        <3>健壮的片
+           生产环境中,每个片都应该是副本集。这样单个的服务器坏了,就不会导致
+           整个片的失效.
+           addshard可以将副本集作为片添加.
+           示例:添加副本集foo,其中一个服务器prod.example.com:27017
+           db.runCommand({
+              "addshard" : "foo/prod.example.com:27017"
+            })
+
+            如果prod.example.com挂了,mongos会知道它所连接的是一个副本集
+            ,并会使用新的主节点
+
+        <5>物理服务器:
+
+      (11)管理分片
+        <1>分片信息主要存放在config数据库上,这样就能被任何连接到mongos
+           的进程访问到了
+
+        <2>配置集合
+           在shards集合中查看所有的片:db.shards.find()
+           db.databases.find() databases集合含有已经在片上的
+           数据库列表和一些相关信息
+        <3>块
+           块信息保存在chunks集合中
+           db.chunks.find()
+        <4>分片命令
+           db.printShardingStatus()获得概要
+
+           db.removeshard从集群删除片,会把给定片上的所有快都挪到其它片上
+           db.runCommand({
+                "removeshard" : "localhost:10000"
+            });
